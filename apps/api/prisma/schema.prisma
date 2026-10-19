@@ -1,0 +1,272 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Danh mục ────────────────────────────────────────────────────────────────
+
+enum ProductType {
+  LOUNGE
+  FAST_TRACK
+}
+
+enum FlightScope {
+  DOMESTIC
+  INTERNATIONAL
+}
+
+/// Fast track có chiều đi và chiều đến; phòng chờ luôn là DEPARTURE.
+enum ServiceDirection {
+  DEPARTURE
+  ARRIVAL
+}
+
+/// MANUAL: ops gửi yêu cầu cho nhà cung cấp và nhập mã xác nhận bằng tay.
+/// API: adapter gọi thẳng hệ thống nhà cung cấp, xác nhận tức thì.
+enum SupplierMode {
+  MANUAL
+  API
+}
+
+model Airport {
+  code     String    @id // IATA
+  name     String
+  city     String
+  country  String    @default("VN")
+  timezone String    @default("Asia/Ho_Chi_Minh")
+  active   Boolean   @default(true)
+  products Product[]
+}
+
+model Supplier {
+  id           String       @id @default(cuid())
+  name         String
+  mode         SupplierMode
+  /// Khóa adapter trong SupplierRegistry: "manual" | "mock-aggregator" | ...
+  adapterKey   String
+  contactEmail String?
+  contactPhone String?
+  active       Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  products     Product[]
+}
+
+model Product {
+  id                  String           @id @default(cuid())
+  type                ProductType
+  airportCode         String
+  airport             Airport          @relation(fields: [airportCode], references: [code])
+  terminal            String
+  scope               FlightScope
+  direction           ServiceDirection @default(DEPARTURE)
+  name                String
+  shortDescription    String
+  description         String           @db.Text
+  amenities           String[]
+  imageUrl            String?
+  openingHours        String?
+  /// Phòng chờ: số giờ được sử dụng tối đa trước giờ bay.
+  maxStayHours        Int?
+  supplierId          String
+  supplier            Supplier         @relation(fields: [supplierId], references: [id])
+  supplierProductCode String?
+  currency            String           @default("VND")
+  // Giá nhập (net) và giá bán theo loại khách, đơn vị: đồng
+  netAdult            Int
+  netChild            Int
+  netInfant           Int
+  priceAdult          Int
+  priceChild          Int
+  priceInfant         Int
+  /// Phải đặt trước giờ phục vụ ít nhất N giờ (NCC xử lý tay cần lâu hơn).
+  leadTimeHours       Int              @default(12)
+  /// Hủy miễn phí nếu còn hơn N giờ trước giờ phục vụ.
+  freeCancelHours     Int              @default(24)
+  active              Boolean          @default(true)
+  sortOrder           Int              @default(0)
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  items               OrderItem[]
+
+  @@index([type, airportCode, active])
+}
+
+// ─── Đối tác phân phối (ngân hàng, ví, super-app) ───────────────────────────
+
+model Partner {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  name            String
+  /// Secret dùng chung để ký token SSO. Môi trường thật: mã hóa at-rest / KMS.
+  ssoSecret       String
+  /// Hoa hồng cho đối tác, đơn vị basis point (100 = 1%).
+  commissionBps   Int      @default(0)
+  /// Khóa cổng thanh toán của đối tác trong PaymentProviderRegistry.
+  paymentProvider String   @default("mock")
+  primaryColor    String   @default("#0B5FFF")
+  logoUrl         String?
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  orders          Order[]
+}
+
+// ─── Đơn hàng ────────────────────────────────────────────────────────────────
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PROCESSING
+  CONFIRMED
+  PARTIALLY_CONFIRMED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum ItemStatus {
+  PENDING
+  PROCESSING
+  CONFIRMED
+  FAILED
+  CANCELLED
+}
+
+enum PaxType {
+  ADULT
+  CHILD
+  INFANT
+}
+
+model Order {
+  id            String        @id @default(cuid())
+  code          String        @unique
+  partnerId     String
+  partner       Partner       @relation(fields: [partnerId], references: [id])
+  partnerUserId String
+  status        OrderStatus   @default(PENDING_PAYMENT)
+  paymentStatus PaymentStatus @default(UNPAID)
+  currency      String        @default("VND")
+  totalAmount   Int
+  refundAmount  Int           @default(0)
+  contactName   String
+  contactPhone  String
+  contactEmail  String
+  expiresAt     DateTime
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  items         OrderItem[]
+  payments      Payment[]
+  events        OrderEvent[]
+
+  @@index([partnerId, partnerUserId])
+  @@index([status, expiresAt])
+}
+
+model OrderItem {
+  id              String           @id @default(cuid())
+  orderId         String
+  order           Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product          @relation(fields: [productId], references: [id])
+  status          ItemStatus       @default(PENDING)
+  flightNumber    String
+  /// Giờ cất cánh (DEPARTURE) hoặc hạ cánh (ARRIVAL), lưu UTC.
+  serviceTime     DateTime
+  adults          Int
+  children        Int
+  infants         Int
+  unitPriceAdult  Int
+  unitPriceChild  Int
+  unitPriceInfant Int
+  amount          Int
+  netAmount       Int
+  supplierRef     String?
+  voucherCode     String?
+  failureReason   String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  passengers      Passenger[]
+  task            FulfillmentTask?
+}
+
+model Passenger {
+  id       String    @id @default(cuid())
+  itemId   String
+  item     OrderItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  fullName String
+  type     PaxType
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id])
+  provider    String
+  providerRef String   @unique
+  paymentUrl  String?
+  amount      Int
+  /// PENDING | SUCCESS | FAILED
+  status      String   @default("PENDING")
+  refunded    Int      @default(0)
+  rawIpn      Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─── Vận hành ────────────────────────────────────────────────────────────────
+
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  FAILED
+}
+
+/// Việc cần ops xử lý tay với nhà cung cấp MANUAL.
+model FulfillmentTask {
+  id          String     @id @default(cuid())
+  itemId      String     @unique
+  item        OrderItem  @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  status      TaskStatus @default(OPEN)
+  assignee    String?
+  dueAt       DateTime
+  note        String?
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([status, dueAt])
+}
+
+model OrderEvent {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  type      String
+  message   String
+  actor     String   @default("system")
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  /// ADMIN: quản lý sản phẩm; OPS: xử lý đơn và hàng đợi
+  role         String   @default("OPS")
+  createdAt    DateTime @default(now())
+}
